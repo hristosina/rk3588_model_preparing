@@ -1,0 +1,39 @@
+
+# Python environments
+.venv/
+venv/
+
+# External repositories
+rknn-toolkit2/
+rknn_model_zoo/
+ultralytics_yolov8/
+ultralytics_yolov12/
+
+# Model weights and converted models
+*.pt
+*.pth
+*.onnx
+*.rknn
+
+# Temporary export files
+.export.*/
+*.tmp
+*.log
+
+# Python cache
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Training outputs
+runs/
+weights/
+
+# Generated tests
+tests/
+
+# IDE and OS files
+.vscode/
+.idea/
+.DS_Store
+
