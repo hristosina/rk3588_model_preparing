@@ -4,9 +4,15 @@ set -Eeuo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT"
 
+if (( EUID == 0 )); then
+    echo 'ERROR: запускайте setup_rknn.sh от обычного пользователя, без sudo' >&2
+    exit 1
+fi
+
 [[ "$(uname -m)" == x86_64 ]] || { echo 'ERROR: требуется Ubuntu x86-64' >&2; exit 1; }
 command -v git >/dev/null || { echo 'ERROR: установите git' >&2; exit 1; }
-command -v python3.10 >/dev/null || { echo 'ERROR: установите python3.10 и python3.10-venv' >&2; exit 1; }
+SYSTEM_PYTHON=/usr/bin/python3.10
+[[ -x "$SYSTEM_PYTHON" ]] || { echo 'ERROR: установите python3.10 и python3.10-venv' >&2; exit 1; }
 
 clone_at_commit() {
     local name="$1" url="$2" commit="$3"
@@ -41,8 +47,14 @@ setup_env() {
 
     echo "==> Настройка $model: $env_dir"
     mkdir -p "$ROOT/$model"
-    if [[ ! -x "$py" ]]; then
-        python3.10 -m venv "$env_dir"
+    # Сломанное или перенесённое venv может содержать недействительные ссылки на Python.
+    if [[ -d "$env_dir" ]] && ! env -u PYTHONPATH -u PYTHONHOME "$py" -c \
+        'import sys; assert sys.version_info[:2] == (3, 10)' >/dev/null 2>&1; then
+        echo "WARNING: повреждённое $env_dir — создаём заново"
+        rm -rf -- "$env_dir"
+    fi
+    if [[ ! -d "$env_dir" ]]; then
+        "$SYSTEM_PYTHON" -m venv "$env_dir"
     fi
     env -u PYTHONPATH -u PYTHONHOME "$py" -c \
         'import sys; assert sys.version_info[:2] == (3, 10), "Требуется Python 3.10"'
@@ -70,30 +82,49 @@ setup_env() {
     pip_install --no-deps 'rknn-toolkit2==2.5.0'
 
     if [[ "$model" == yolov12s ]]; then
-        # YOLOv12-Turbo: зависимости, отсутствующие в основном pyproject.toml.
-        # Не устанавливаем весь requirements.txt: в нём CUDA/flash-attn для cp311
-        # и ONNX 1.14.0, несовместимый с ограничениями RKNN-Toolkit2 2.5.0.
+        # Стандартная Ultralytics для весов AAttn.qkv.
+        # Оригинальный YOLOv12-Turbo (AAttn.qk/v) импортируется из репозитория
+        # через PYTHONPATH только при выборе варианта turbo.
         pip_install 'huggingface-hub==0.23.2' 'safetensors==0.4.3' 'timm==1.0.14'
+        pip_install --no-deps --force-reinstall 'ultralytics==8.3.237'
+    else
+        pip_install --no-deps -e "$ROOT/$fork"
     fi
 
-    # Каждый fork устанавливается только в СВОЙ venv, вместо PYTHONPATH.
-    pip_install --no-deps -e "$ROOT/$fork"
-
     env -u PYTHONPATH -u PYTHONHOME -u VIRTUAL_ENV "$py" -m pip check
-    env -u PYTHONPATH -u PYTHONHOME -u VIRTUAL_ENV "$py" - "$ROOT/$fork" <<'PYTHON'
+    if [[ "$model" == yolov12s ]]; then
+        env -u PYTHONPATH -u PYTHONHOME -u VIRTUAL_ENV "$py" - <<'PYTHON'
+from pathlib import Path
+from importlib.metadata import version
+import ultralytics
+from rknn.api import RKNN
+assert ultralytics.__version__ == '8.3.237', ultralytics.__file__
+assert version('rknn-toolkit2') == '2.5.0'
+print('YOLO12 standard:', ultralytics.__version__, Path(ultralytics.__file__).resolve())
+PYTHON
+        PYTHONPATH="$ROOT/ultralytics_yolov12" env -u PYTHONHOME -u VIRTUAL_ENV "$py" - "$ROOT/ultralytics_yolov12" <<'PYTHON'
+from pathlib import Path
+import sys
+import ultralytics
+expected = Path(sys.argv[1]).resolve()
+actual = Path(ultralytics.__file__).resolve()
+assert actual.is_relative_to(expected), (expected, actual)
+print('YOLO12 turbo:', ultralytics.__version__, actual)
+PYTHON
+    else
+        env -u PYTHONPATH -u PYTHONHOME -u VIRTUAL_ENV "$py" - "$ROOT/$fork" <<'PYTHON'
 import sys
 from pathlib import Path
 from importlib.metadata import version
 import ultralytics
 from rknn.api import RKNN
-
 expected = Path(sys.argv[1]).resolve()
 actual = Path(ultralytics.__file__).resolve()
-assert actual.is_relative_to(expected), f'Ожидали {expected}, но импортируется {actual}'
+assert actual.is_relative_to(expected), (expected, actual)
 assert version('rknn-toolkit2') == '2.5.0'
-print('Ultralytics:', ultralytics.__version__, actual)
-print('RKNN-Toolkit2:', version('rknn-toolkit2'))
+print('YOLOv8 fork:', ultralytics.__version__, actual)
 PYTHON
+    fi
     echo "OK: $model"
 }
 
@@ -103,4 +134,3 @@ setup_env yolov12s 2.2.2 0.17.2 ultralytics_yolov12
 echo '==> Окружения готовы:'
 echo "    $ROOT/yolov8s/.venv"
 echo "    $ROOT/yolov12s/.venv"
-
